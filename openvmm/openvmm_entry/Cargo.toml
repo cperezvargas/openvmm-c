@@ -3,7 +3,7 @@
 
 [package]
 name = "openvmm_entry"
-edition = "2021"
+edition.workspace = true
 rust-version.workspace = true
 
 [features]
@@ -68,6 +68,7 @@ vtl2_settings_proto.workspace = true
 mcr_resources.workspace = true
 
 clap_dyn_complete.workspace = true
+console_relay.workspace = true
 guid.workspace = true
 inspect.workspace = true
 inspect_proto.workspace = true

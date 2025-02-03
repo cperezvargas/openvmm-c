@@ -19,6 +19,8 @@ use hyperv::run_hvc;
 use mesh::rpc::RpcSend;
 use pal_async::DefaultDriver;
 use rustyline_printer::Printer;
+use std::fmt::Display;
+use std::path::PathBuf;
 use std::sync::Arc;
 use vm::Vm;
 
@@ -27,6 +29,7 @@ use vm::Vm;
     disable_help_flag = true,
     disable_version_flag = true,
     no_binary_name = true,
+    max_term_width = 100,
     help_template("{subcommands}")
 )]
 pub(crate) enum InteractiveCommand {
@@ -42,6 +45,10 @@ pub(crate) enum InteractiveCommand {
     /// Detach from the active VM.
     Detach,
 
+    /// Quit the interactive shell.
+    #[clap(visible_alias = "q")]
+    Quit,
+
     #[clap(flatten)]
     Vm(VmCommand),
 }
@@ -49,14 +56,22 @@ pub(crate) enum InteractiveCommand {
 #[derive(Parser)]
 pub(crate) enum VmCommand {
     /// Start the VM.
-    Start {
-        /// Tell the paravisor to start the VM.
-        #[clap(short, long)]
-        paravisor: bool,
-    },
+    Start,
+
+    /// Paravisor commands.
+    #[clap(subcommand, visible_alias = "pv")]
+    Paravisor(ParavisorCommand),
 
     /// Power off the VM.
-    Kill,
+    Kill {
+        /// Force powering off the VM via the HCS API.
+        ///
+        /// Without this flag, this command uses the Hyper-V WMI interface.
+        /// This may fail if the VM is in a transition state that prevents
+        /// powering off for whatever reason (usually due to Hyper-V bugs).
+        #[clap(short, long)]
+        force: bool,
+    },
 
     /// Reset the VM.
     Reset,
@@ -74,52 +89,87 @@ pub(crate) enum VmCommand {
         force: bool,
     },
 
-    /// Sets the serial output mode.
+    /// Gets or sets the serial output mode.
     Serial {
         /// The serial port to configure (1 = COM1, etc.).
-        port: u32,
+        port: Option<u32>,
         /// The serial output mode.
-        mode: SerialMode,
-    },
-
-    /// Inspect host or paravisor state.
-    #[clap(visible_alias = "x")]
-    Inspect {
-        /// Enumerate state recursively.
-        #[clap(short, long)]
-        recursive: bool,
-        /// The recursive depth limit.
-        #[clap(short, long, requires("recursive"))]
-        limit: Option<usize>,
-        /// Send the inspect request to the paravisor running in the VM.
-        #[clap(short = 'p', short_alias = 'v', long)]
-        paravisor: bool,
-        /// Update the path with a new value.
-        #[clap(short, long, conflicts_with("recursive"))]
-        update: Option<String>,
-        /// The element path to inspect.
-        element: Option<String>,
+        mode: Option<SerialMode>,
     },
 }
 
-#[derive(ValueEnum, Clone)]
+#[derive(Parser)]
+pub(crate) struct InspectArgs {
+    /// Enumerate state recursively.
+    #[clap(short, long)]
+    recursive: bool,
+    /// The recursive depth limit.
+    #[clap(short, long, requires("recursive"))]
+    limit: Option<usize>,
+    /// Update the path with a new value.
+    #[clap(short, long, conflicts_with("recursive"))]
+    update: Option<String>,
+    /// The element path to inspect.
+    element: Option<String>,
+}
+
+#[derive(ValueEnum, Copy, Clone)]
 pub(crate) enum SerialMode {
     /// The serial port is disconnected.
     Off,
-    /// The serial port output is connected to the host's console.
-    Output,
-    // TODO: add Console mode for interactive console, and Terminal mode for
-    // launching a terminal emulator.
+    /// The serial port output is logged to standard output.
+    Log,
+    /// The serial port input and output are connected to a new terminal
+    /// emulator window.
+    Term,
+    // TODO: add Console mode for interactive console.
+}
+
+impl Display for SerialMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.to_possible_value().unwrap().get_name())
+    }
+}
+
+#[derive(Parser)]
+pub(crate) enum ParavisorCommand {
+    /// Tell the paravisor to start the VM.
+    Start,
+
+    /// Get or set the output mode for paravisor kmsg logs.
+    Kmsg { mode: Option<LogMode> },
+
+    /// Inpsect paravisor state.
+    #[clap(visible_alias = "x")]
+    Inspect(InspectArgs),
+
+    /// Get or set the paravisor command line.
+    CommandLine { command_line: Option<String> },
+}
+
+#[derive(ValueEnum, Copy, Clone)]
+pub enum LogMode {
+    /// The log output is disabled.
+    Off,
+    /// The log is written to standard output.
+    Log,
+    /// The log is written to a new terminal emulator window.
+    Term,
+}
+
+impl Display for LogMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.to_possible_value().unwrap().get_name())
+    }
 }
 
 pub(crate) enum Request {
     Prompt(mesh::rpc::Rpc<(), String>),
     Inspect(mesh::rpc::Rpc<(InspectTarget, String), anyhow::Result<inspect::Node>>),
-    Command(mesh::rpc::Rpc<InteractiveCommand, anyhow::Result<()>>),
+    Command(mesh::rpc::Rpc<InteractiveCommand, anyhow::Result<bool>>),
 }
 
 pub(crate) enum InspectTarget {
-    Host,
     Paravisor,
 }
 
@@ -130,10 +180,15 @@ pub(crate) enum InspectTarget {
 struct CommandLine {
     /// The initial VM name. Use select to change the active VM.
     vm: Option<String>,
+    #[clap(long, hide(true))]
+    relay_console_path: Option<PathBuf>,
 }
 
 pub async fn main(driver: DefaultDriver) -> anyhow::Result<()> {
     let command_line = CommandLine::parse();
+    if let Some(relay_console_path) = command_line.relay_console_path {
+        return console_relay::relay_console(&relay_console_path);
+    }
 
     let mut rl = rustyline::Editor::<_, rustyline::history::FileHistory>::with_config(
         rustyline::Config::builder()
@@ -215,7 +270,8 @@ pub async fn main(driver: DefaultDriver) -> anyhow::Result<()> {
 
             match parse(&mut template, trimmed) {
                 Ok(cmd) => match block_on(send.call_failable(Request::Command, cmd)) {
-                    Ok(()) => {}
+                    Ok(true) => {}
+                    Ok(false) => break,
                     Err(err) => {
                         eprintln!("{:#}", err);
                     }
@@ -275,8 +331,11 @@ pub async fn main(driver: DefaultDriver) -> anyhow::Result<()> {
                                 .handle_command(cmd)
                                 .await?;
                         }
+                        InteractiveCommand::Quit => {
+                            return Ok(false);
+                        }
                     }
-                    Ok(())
+                    Ok(true)
                 })
                 .await
             }

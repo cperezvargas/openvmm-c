@@ -17,14 +17,15 @@ will always be a Hyper-V specific tool.
 Currently, it can:
 
 * Change VM state (starting/stopping/resetting)
-* Enable serial port output
+* Enable serial port output to standard output, or input/output to another
+  terminal window
+* Enable paravisor log output to standard output or another terminal window
 * Inspect paravisor state
 
 In the future, it might be able to:
 
-* Enable paravisor and Hyper-V log output
-* Enable serial port input
-* Capture serial port output to another terminal window or file
+* Enable Hyper-V log output
+* Capture serial port output to a file
 * Inspect host state
 * Persistence workspaces (save/restore configured serial ports and logs)
 
@@ -44,11 +45,18 @@ After this, all commands will implicitly operate on `tdxvm`. Use `select` again
 to work on another VM.
 
 To enable serial port output, use the `serial` command. This can be used at any
-time, even while the VM is not running. E.g., to enable serial port output for
-COM2:
+time, even while the VM is not running. E.g., to open a separate window for
+interactive use of COM1 and enable logging serial port output for COM2:
 
 ```
-tdxvm [off]> serial 2 output
+tdxvm [off]> serial 1 term
+tdxvm [off]> serial 2 log
+```
+
+You can also enable paravisor log output at any time:
+
+```
+tdxvm [off]> paravisor kmsg log
 ```
 
 Start a VM with `start`. This is an asynchronous command: you can continue to
@@ -61,7 +69,8 @@ on the prompt may not be accurate until you type another command or press Enter.
 
 ```
 tdxvm [off]> start
-serial port 2 connected
+com1 connected
+com2 connected
 VM started
 tdxvm [off]>
 tdxvm [running]>
@@ -69,11 +78,10 @@ tdxvm [running]>
 
 At this point, the VM is running, including the paravisor (if one is
 configured). As in the OpenVMM interactive console, you can inspect paravisor
-state with the `inspect` or `x` command, passing `-p` to specify that you want
-to inspect paravisor state:
+state with the `inspect` or `x` command, but under the `paravisor`/`pv` command:
 
 ```
-tdxvm [running]> x -p
+tdxvm [running]> pv x
 {
     build_info: _,
     control_state: "started",
@@ -92,7 +100,8 @@ VM.
 
 ```
 tdxvm [running]> kill
-serial port 2 disconnected
+com1 disconnected
+com2 disconnected
 VM killed
 tdxvm [stopping]>
 tdxvm [off]>

@@ -6,7 +6,7 @@
 //! The client interface to the sidecar kernel driver.
 
 // UNSAFETY: Manually mapping memory for the sidecar kernel and calling ioctls.
-#![allow(unsafe_code)]
+#![expect(unsafe_code)]
 #![warn(missing_docs)]
 
 use fs_err::os::unix::fs::OpenOptionsExt;
@@ -15,6 +15,7 @@ use hvdef::hypercall::HvRegisterAssoc;
 use hvdef::hypercall::TranslateVirtualAddressExOutputX64;
 use hvdef::HvError;
 use hvdef::HvMessage;
+use hvdef::HvStatus;
 use pal_async::driver::PollImpl;
 use pal_async::driver::SpawnDriver;
 use pal_async::fd::PollFdReady;
@@ -434,7 +435,7 @@ impl<'a> SidecarVp<'a> {
                     count: regs.len() as u16,
                     target_vtl,
                     rsvd: 0,
-                    result: HvError(0),
+                    status: HvStatus::SUCCESS,
                     rsvd2: [0; 10],
                     regs: [],
                 },
@@ -442,11 +443,9 @@ impl<'a> SidecarVp<'a> {
             );
             buf.copy_from_slice(regs);
             self.run_sync()?;
-            let (&GetSetVpRegisterRequest { result, .. }, buf) =
+            let (&GetSetVpRegisterRequest { status, .. }, buf) =
                 self.command_result::<_, HvRegisterAssoc>(regs.len())?;
-            if result != HvError(0) {
-                return Err(SidecarError::Hypervisor(result));
-            }
+            status.result().map_err(SidecarError::Hypervisor)?;
             regs.copy_from_slice(buf);
         }
         Ok(())
@@ -466,7 +465,7 @@ impl<'a> SidecarVp<'a> {
                     count: regs.len() as u16,
                     target_vtl,
                     rsvd: 0,
-                    result: HvError(0),
+                    status: HvStatus::SUCCESS,
                     rsvd2: [0; 10],
                     regs: [],
                 },
@@ -474,10 +473,8 @@ impl<'a> SidecarVp<'a> {
             );
             buf.copy_from_slice(regs);
             self.run_sync()?;
-            let &GetSetVpRegisterRequest { result, .. } = self.command_result::<_, u8>(0)?.0;
-            if result != HvError(0) {
-                return Err(SidecarError::Hypervisor(result));
-            }
+            let &GetSetVpRegisterRequest { status, .. } = self.command_result::<_, u8>(0)?.0;
+            status.result().map_err(SidecarError::Hypervisor)?;
         }
         Ok(())
     }
@@ -491,16 +488,14 @@ impl<'a> SidecarVp<'a> {
     ) -> Result<TranslateVirtualAddressExOutputX64, SidecarError> {
         tracing::trace!("translate gva");
         let &TranslateGvaResponse {
-            result,
+            status,
             rsvd: _,
             output,
         } = self.dispatch_sync(
             SidecarCommand::TRANSLATE_GVA,
             TranslateGvaRequest { gvn, control_flags },
         )?;
-        if result != HvError(0) {
-            return Err(SidecarError::Hypervisor(result));
-        }
+        status.result().map_err(SidecarError::Hypervisor)?;
         Ok(output)
     }
 
@@ -572,7 +567,7 @@ impl<'a> SidecarVp<'a> {
             match &mut *vp {
                 VpState::Stopped => unreachable!(),
                 VpState::Running(waker) => {
-                    if !waker.as_ref().map_or(false, |w| cx.waker().will_wake(w)) {
+                    if waker.as_ref().is_none_or(|w| !cx.waker().will_wake(w)) {
                         *waker = Some(cx.waker().clone());
                     }
                     Poll::Pending

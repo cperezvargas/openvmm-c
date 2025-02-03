@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-#![allow(missing_docs)]
+#![expect(missing_docs)]
 
 use crate::mapping::GuestMemoryMapping;
 use crate::mapping::HardwareIsolatedMemoryProtector;
@@ -469,8 +469,7 @@ async fn apply_vtl2_protections(
                         tracing::debug!(
                             cpu = underhill_threadpool::Thread::current()
                                 .unwrap()
-                                .driver()
-                                .target_cpu(),
+                                .with_driver(|driver| driver.target_cpu()),
                             %range,
                             "applying protections"
                         );
